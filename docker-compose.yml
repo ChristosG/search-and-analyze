@@ -1,0 +1,110 @@
+version: "3.8"
+
+services:
+  # --- Zookeeper (for Kafka) ---
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.3.0
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2182:2181"   # Host port 2182 → Container port 2181
+    networks:
+      - shared_network
+
+  # --- Kafka Broker ---
+  kafka:
+    image: confluentinc/cp-kafka:7.3.0
+    depends_on:
+      - zookeeper
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+    ports:
+      - "9093:9093"    # For host connections
+      - "29092:29092"  # For inter‑container communication
+    networks:
+      - shared_network
+
+  # --- Postgres Database ---
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: mydatabase
+    command: ["postgres", "-c", "wal_level=logical"]
+    ports:
+      - "5433:5432"  # Host port 5433 → Container port 5432
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - shared_network
+
+  # --- Kafka Connect (Debezium) ---
+  kafka-connect:
+    image: debezium/connect:1.9
+    depends_on:
+      - kafka
+      - postgres
+    environment:
+      BOOTSTRAP_SERVERS: kafka:29092
+      GROUP_ID: "1"
+      CONFIG_STORAGE_TOPIC: my_connect_configs
+      OFFSET_STORAGE_TOPIC: my_connect_offsets
+      STATUS_STORAGE_TOPIC: my_connect_statuses
+      KEY_CONVERTER_SCHEMAS_ENABLE: "false"
+      VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
+    ports:
+      - "8084:8083"  # Host port 8084 → Container port 8083
+    networks:
+      - shared_network
+
+  # --- Redis (with auto‑invalidation via LRU) ---
+  redis:
+    image: redis:7
+    ports:
+      - "6380:6379"  # Host port 6380 → Container port 6379
+    command: ["redis-server", "--maxmemory", "4096mb", "--maxmemory-policy", "allkeys-lru"]
+    volumes:
+      - redisdata:/data
+    networks:
+      - shared_network
+
+  # --- Scraper Service (Flask-based) ---
+  scraper:
+    build: ./scraper
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - postgres
+      - kafka
+      - kafka-connect
+      - redis
+    environment:
+      # These variables are used by our scraper code.
+      POSTGRES_URL: "postgresql://user:password@postgres:5432/mydatabase"
+      REDIS_HOST: "redis"
+      REDIS_PORT: "6379"
+      KAFKA_BROKER: "kafka:29092"
+      # Set your SearxNG endpoint here. Now that the searxng service is on a shared network,
+      # you can refer to it by its service/container name if you adjust the configuration there.
+      SEARXNG_URL: "http://searxng:8080/search"
+    ports:
+      - "5000:5000"  # The scraper’s API is exposed on port 5000
+    networks:
+      - shared_network
+
+volumes:
+  pgdata:
+  redisdata:
+
+networks:
+  shared_network:
+    external: true
+
